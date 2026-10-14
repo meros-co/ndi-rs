@@ -60,6 +60,8 @@ executable.
 
 ## Licence
 
-Proprietary, © Meros. NDI® is a registered trademark of Vizrt NDI AB; use of
-the SDK is subject to its licence, and every application must meet NDI's
-branding and licence terms itself.
+MIT (see LICENSE). This crate contains no NDI SDK files: it generates
+bindings from, and links against, an SDK you install yourself. NDI® is a
+registered trademark of Vizrt NDI AB; use of the SDK is subject to its
+licence, and every application must meet NDI's branding and licence terms
+itself.
