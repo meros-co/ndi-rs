@@ -1,0 +1,23 @@
+[package]
+name = "meros-ndi"
+version = "0.1.0"
+edition = "2024"
+description = "NDI for Android, iOS and Windows: SDK linking, configuration, discovery, receive and send"
+license = "LicenseRef-Meros-Proprietary"
+publish = false
+# Lets a dependent's build script read what this crate linked (DEP_NDI_*):
+# see README "Linking into a final artifact".
+links = "ndi"
+
+[lib]
+name = "meros_ndi"
+
+[dependencies]
+log = "0.4"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[build-dependencies]
+bindgen = "0.72"
