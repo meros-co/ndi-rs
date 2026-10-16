@@ -10,6 +10,21 @@ let mut rx = meros_ndi::Receiver::connect(&names[0], meros_ndi::Bandwidth::Highe
 let mut tx = meros_ndi::Sender::new("My Output")?;
 ```
 
+A sender takes each frame's timecode from the caller (`Timecode::from_smpte`,
+`Timecode::from_micros`, or `Timecode::Synthesize` to let the SDK pick), padded
+UYVY rows and audio of any channel count and rate:
+
+```rust
+tx.send_video_frame(&meros_ndi::VideoFrame {
+    pixels: &uyvy, width: 1920, height: 1080, stride: 0,
+    format: meros_ndi::PixelFormat::Uyvy, fps_n: 30000, fps_d: 1001,
+    timecode: meros_ndi::Timecode::from_smpte(10, 0, 0, 0, 30000, 1001),
+});
+let tally = tx.poll_tally(0).tally; // program/preview set by receivers
+```
+
+`Receiver::set_tally` sets it from the receiving side, as a switcher does.
+
 When the SDK is not linked for the target, `AVAILABLE` is `false` and calls
 report NDI as unavailable rather than failing to build.
 

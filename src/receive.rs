@@ -25,6 +25,9 @@ pub enum Capture {
         stride: usize,
         /// Sender timestamp in microseconds.
         pts_us: i64,
+        /// The sender's timecode in 100 ns units (see
+        /// [`Timecode`](crate::Timecode)).
+        timecode: i64,
     },
     /// Interleaved 16-bit PCM at the sender's rate and channel count. May be
     /// empty.
@@ -135,6 +138,7 @@ impl Receiver {
                     height: video.yres,
                     stride,
                     pts_us: video.timestamp * 10 / 100, // 100ns ticks → µs
+                    timecode: video.timecode,
                 };
                 ffi::NDIlib_recv_free_video_v2(self.recv, &video);
                 capture
@@ -148,6 +152,27 @@ impl Receiver {
         {
             let _ = timeout_ms;
             Capture::Error
+        }
+    }
+}
+
+impl Receiver {
+    /// Tells the source whether this receiver has it on program or preview,
+    /// as a switcher does. The source reads it with
+    /// [`Sender::poll_tally`](crate::Sender::poll_tally).
+    pub fn set_tally(&self, tally: crate::Tally) -> bool {
+        #[cfg(has_ndi)]
+        unsafe {
+            let t = ffi::NDIlib_tally_t {
+                on_program: tally.program,
+                on_preview: tally.preview,
+            };
+            ffi::NDIlib_recv_set_tally(self.recv, &t)
+        }
+        #[cfg(not(has_ndi))]
+        {
+            let _ = tally;
+            false
         }
     }
 }

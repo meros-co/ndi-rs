@@ -6,7 +6,9 @@
 //! - [`discover_sources`] lists sources on the network.
 //! - [`Receiver`] receives one source. The SDK decodes NDI HX internally, so
 //!   video arrives raw (UYVY) and audio as interleaved 16-bit PCM.
-//! - [`Sender`] publishes a source from UYVY/UYVA video and 16-bit audio.
+//! - [`Sender`] publishes a source from UYVY/UYVA video and 16-bit audio,
+//!   each frame carrying the caller's [`Timecode`], and reports the
+//!   program/preview [`Tally`] its receivers set.
 //!
 //! When the SDK is not linked for the target ([`AVAILABLE`] is false) every
 //! call reports NDI as unavailable instead of failing to compile.
@@ -18,7 +20,7 @@ mod receive;
 mod send;
 
 pub use receive::{Bandwidth, Capture, Receiver};
-pub use send::Sender;
+pub use send::{AudioFrame, PixelFormat, Sender, Tally, TallyPoll, Timecode, VideoFrame};
 
 /// Whether this build links the NDI SDK.
 pub const AVAILABLE: bool = cfg!(has_ndi);
@@ -29,7 +31,13 @@ pub const AVAILABLE: bool = cfg!(has_ndi);
 pub fn sanitize_machine_name(machine_name: &str) -> String {
     machine_name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -131,7 +139,11 @@ pub fn discover_sources(timeout_ms: u32) -> Vec<String> {
         for i in 0..count as isize {
             let src = &*sources.offset(i);
             if !src.p_ndi_name.is_null() {
-                names.push(CStr::from_ptr(src.p_ndi_name).to_string_lossy().into_owned());
+                names.push(
+                    CStr::from_ptr(src.p_ndi_name)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
             }
         }
         ffi::NDIlib_find_destroy(finder);
@@ -225,5 +237,132 @@ mod sdk_tests {
         }
         let sender = super::Sender::new("meros-ndi unit test").unwrap();
         assert_eq!(sender.connections(), 0);
+    }
+}
+
+#[cfg(test)]
+mod timecode_tests {
+    use super::Timecode;
+
+    #[test]
+    fn smpte_time_of_day_counts_100ns_units() {
+        // 01:02:03:12 at 25 fps: 3723 s + 12/25 s.
+        assert_eq!(
+            Timecode::from_smpte(1, 2, 3, 12, 25, 1),
+            Timecode::Ticks(3723 * 10_000_000 + 4_800_000)
+        );
+        // Frame 1 at 30000/1001 lasts 1001/30000 s.
+        assert_eq!(
+            Timecode::from_smpte(0, 0, 0, 1, 30000, 1001),
+            Timecode::Ticks(333_666)
+        );
+        assert_eq!(Timecode::from_micros(1_500), Timecode::Ticks(15_000));
+    }
+}
+
+#[cfg(test)]
+mod loopback_tests {
+    //! A sender and a receiver on this machine, through the real SDK.
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn connect_to(sender_name: &str) -> Option<Receiver> {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            if let Some(full) = discover_sources(1000)
+                .into_iter()
+                .find(|s| s.ends_with(&format!("({sender_name})")))
+            {
+                return Receiver::connect(&full, Bandwidth::Highest).ok();
+            }
+        }
+        None
+    }
+
+    fn uyvy_grey(width: u32, height: u32) -> Vec<u8> {
+        [0x80u8, 0x80].repeat((width * height) as usize)
+    }
+
+    /// The caller's timecode reaches the receiver unchanged, padded rows
+    /// included, instead of a clock the SDK picks.
+    #[test]
+    fn a_caller_timecode_reaches_the_receiver() {
+        if !AVAILABLE {
+            eprintln!("NDI SDK not linked - skipping");
+            return;
+        }
+        let name = format!("meros-ndi tc {}", std::process::id());
+        let mut sender = Sender::new(&name).unwrap();
+        let mut recv = connect_to(&name).expect("sender not discovered");
+        let (w, h) = (64u32, 36u32);
+        // 16 bytes of padding per row: the receiver must still see the frame.
+        let stride = w * 2 + 16;
+        let mut pixels = vec![0u8; (stride * h) as usize];
+        for row in pixels.chunks_mut(stride as usize) {
+            row[..(w * 2) as usize].copy_from_slice(&uyvy_grey(w, 1));
+        }
+        let tc = Timecode::from_smpte(10, 0, 0, 5, 30, 1);
+        let Timecode::Ticks(want) = tc else {
+            unreachable!()
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            sender.send_video_frame(&VideoFrame {
+                pixels: &pixels,
+                width: w,
+                height: h,
+                stride,
+                format: PixelFormat::Uyvy,
+                fps_n: 30,
+                fps_d: 1,
+                timecode: tc,
+            });
+            if let Capture::Video {
+                width, timecode, ..
+            } = recv.capture(100)
+            {
+                assert_eq!(width, w as i32);
+                assert_eq!(timecode, want);
+                return;
+            }
+        }
+        panic!("no video frame arrived");
+    }
+
+    /// Tally a receiver sets reaches the sender, for program and preview.
+    #[test]
+    fn receiver_tally_reaches_the_sender() {
+        if !AVAILABLE {
+            eprintln!("NDI SDK not linked - skipping");
+            return;
+        }
+        let name = format!("meros-ndi tally {}", std::process::id());
+        let mut sender = Sender::new(&name).unwrap();
+        let mut recv = connect_to(&name).expect("sender not discovered");
+        // Frames make the connection real before tally travels over it.
+        let pixels = uyvy_grey(32, 18);
+        let wait_for = |sender: &mut Sender, recv: &mut Receiver, want: Tally| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                sender.send_video(&pixels, 32, 18, false, 30, 1, 0);
+                let _ = recv.capture(10);
+                recv.set_tally(want);
+                if sender.poll_tally(50).tally == want {
+                    return;
+                }
+            }
+            panic!("sender never saw {want:?}");
+        };
+        let on_air = Tally {
+            program: true,
+            preview: false,
+        };
+        wait_for(&mut sender, &mut recv, on_air);
+        let previewed = Tally {
+            program: false,
+            preview: true,
+        };
+        wait_for(&mut sender, &mut recv, previewed);
+        wait_for(&mut sender, &mut recv, Tally::default());
     }
 }
