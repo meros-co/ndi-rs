@@ -3,7 +3,9 @@
 //!
 //! - [`configure`] writes the SDK config (machine name, discovery server,
 //!   adapter) and must run before the first NDI call.
-//! - [`discover_sources`] lists sources on the network.
+//! - [`discover_sources`] lists sources on the network once; [`Finder`] keeps
+//!   discovery running, and [`watch_sources`] reports the list whenever a
+//!   source appears or goes away.
 //! - [`Receiver`] receives one source. The SDK decodes NDI HX internally, so
 //!   video arrives raw (UYVY) and audio as interleaved 16-bit PCM.
 //! - [`Sender`] publishes a source from UYVY/UYVA video and 16-bit audio,
@@ -16,9 +18,11 @@
 #[cfg(has_ndi)]
 pub mod ffi;
 
+mod find;
 mod receive;
 mod send;
 
+pub use find::{Finder, SourceWatch, watch_sources};
 pub use receive::{Bandwidth, Capture, Receiver};
 pub use send::{AudioFrame, PixelFormat, Sender, Tally, TallyPoll, Timecode, VideoFrame};
 
@@ -115,45 +119,14 @@ pub fn probe() -> String {
 }
 
 /// Discovers NDI sources on the network. Blocks up to `timeout_ms`. Empty
-/// when NDI is unavailable.
+/// when NDI is unavailable. For a list kept current, see [`Finder`] and
+/// [`watch_sources`].
 pub fn discover_sources(timeout_ms: u32) -> Vec<String> {
-    #[cfg(has_ndi)]
-    unsafe {
-        use std::ffi::CStr;
-        if !ffi::NDIlib_initialize() {
-            return Vec::new();
-        }
-        let create = ffi::NDIlib_find_create_t {
-            show_local_sources: true,
-            p_groups: std::ptr::null(),
-            p_extra_ips: std::ptr::null(),
-        };
-        let finder = ffi::NDIlib_find_create_v2(&create);
-        if finder.is_null() {
-            return Vec::new();
-        }
-        ffi::NDIlib_find_wait_for_sources(finder, timeout_ms);
-        let mut count: u32 = 0;
-        let sources = ffi::NDIlib_find_get_current_sources(finder, &mut count);
-        let mut names = Vec::with_capacity(count as usize);
-        for i in 0..count as isize {
-            let src = &*sources.offset(i);
-            if !src.p_ndi_name.is_null() {
-                names.push(
-                    CStr::from_ptr(src.p_ndi_name)
-                        .to_string_lossy()
-                        .into_owned(),
-                );
-            }
-        }
-        ffi::NDIlib_find_destroy(finder);
-        names
-    }
-    #[cfg(not(has_ndi))]
-    {
-        let _ = timeout_ms;
-        Vec::new()
-    }
+    let Ok(finder) = Finder::new() else {
+        return Vec::new();
+    };
+    finder.wait_for_change(timeout_ms);
+    finder.sources()
 }
 
 #[cfg(test)]

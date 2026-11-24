@@ -10,6 +10,14 @@ let mut rx = meros_ndi::Receiver::connect(&names[0], meros_ndi::Bandwidth::Highe
 let mut tx = meros_ndi::Sender::new("My Output")?;
 ```
 
+Discovery can also stay running: `Finder` keeps the SDK's list current, and
+`watch_sources` reports the full list on its own thread whenever a source
+appears or goes away, until the returned handle is dropped:
+
+```rust
+let watch = meros_ndi::watch_sources(|names| println!("{names:?}"))?;
+```
+
 A sender takes each frame's timecode from the caller (`Timecode::from_smpte`,
 `Timecode::from_micros`, or `Timecode::Synthesize` to let the SDK pick), padded
 UYVY rows and audio of any channel count and rate:
