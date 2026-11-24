@@ -1,21 +1,23 @@
 //! Links the NDI SDK for the target and generates its FFI bindings.
 //!
-//! Sets `cfg(has_ndi)` inside this crate when the SDK is linked: Android,
-//! iOS devices (the SDK's arm64 slice is device-only, so simulator builds
-//! stub NDI) and Windows x64/x86 (the only slices the Windows SDK ships)
-//! when the SDK is installed.
+//! Sets `cfg(has_ndi)` inside this crate when the SDK is linked: Android
+//! (every ABI the SDK ships, armeabi-v7a included), iOS and tvOS devices
+//! (static archives; simulator builds stub NDI), macOS (libndi.dylib), and,
+//! when their SDK is installed, Windows x64/x86 and Linux.
 //!
 //! Dependents learn the outcome through `links = "ndi"` metadata:
 //!  - `DEP_NDI_HAS_NDI=1` when the SDK is linked;
 //!  - `DEP_NDI_LINK_ARGS`: `;`-separated linker arguments the final
 //!    artifact must pass itself, because Cargo applies `rustc-link-arg` only
-//!    to the package that emits it (the Windows delay-load, iOS clang_rt).
+//!    to the package that emits it (the Windows delay-load, the iOS and tvOS
+//!    clang_rt, the macOS and Linux rpath to the SDK copy for development).
 //!
 //! Environment:
-//!  - `NDI_SDK_DIR` (Windows), `NDI_SDK_ANDROID_DIR`, `NDI_SDK_APPLE_DIR`:
-//!    SDK locations, defaulting to the installers' paths.
+//!  - `NDI_SDK_DIR` (Windows), `NDI_SDK_ANDROID_DIR`, `NDI_SDK_APPLE_DIR`,
+//!    `NDI_SDK_LINUX_DIR`: SDK locations, defaulting to the installers' paths
+//!    (/opt/NDI SDK for Linux).
 //!  - `NDI_REQUIRE_SDK=1`: fail the build instead of building without NDI
-//!    when the Windows SDK is missing (for release builds).
+//!    when the Windows or Linux SDK is missing (for release builds).
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(has_ndi)");
@@ -26,19 +28,38 @@ fn main() {
     let linked = if target_os == "android" {
         link_ndi_android();
         true
-    } else if target_os == "ios" && target_abi != "sim" {
-        // Frameworks libndi_ios.a depends on.
+    } else if let Some(platform) = AppleStatic::for_target(&target_os, &target_abi) {
+        // Frameworks the static libndi depends on.
         for framework in ["AudioToolbox", "Foundation", "AVFoundation", "Network", "Accelerate"] {
             println!("cargo:rustc-link-lib=framework={framework}");
         }
         // libndi references ___chkstk_darwin (compiler-rt). rustc links
         // with -nodefaultlibs, so clang_rt must be passed explicitly.
         // (Xcode's own link of the app gets it automatically from clang.)
-        if let Some(clang_rt) = ios_clang_rt_path() {
+        if let Some(clang_rt) = apple_clang_rt_path(&platform) {
             link_args.push(clang_rt);
         }
-        link_ndi_apple();
+        link_ndi_apple_static(&platform);
         true
+    } else if target_os == "macos" {
+        link_args.extend(link_ndi_macos());
+        true
+    } else if target_os == "linux" {
+        match ndi_sdk_linux() {
+            Some(sdk_dir) => {
+                link_args.extend(link_ndi_linux(&sdk_dir));
+                true
+            }
+            None if std::env::var("NDI_REQUIRE_SDK").as_deref() == Ok("1") => {
+                panic!("NDI SDK for Linux not found and NDI_REQUIRE_SDK=1. Set NDI_SDK_LINUX_DIR.")
+            }
+            None => {
+                println!(
+                    "cargo:warning=NDI SDK for Linux not found - building without NDI. Set NDI_SDK_LINUX_DIR."
+                );
+                false
+            }
+        }
     } else if target_os == "windows" {
         if let Some(sdk_dir) = ndi_sdk_windows() {
             link_args.extend(link_ndi_windows(&sdk_dir));
@@ -130,34 +151,91 @@ fn link_ndi_windows(sdk_dir: &str) -> Vec<String> {
     ]
 }
 
-/// Generates FFI bindings against the NDI SDK for Apple and emits link flags
-/// for `libndi_ios.a`, bundled into this crate's rlib so the final static
-/// library needs no NDI flags of its own.
-fn link_ndi_apple() {
-    let sdk_dir = std::env::var("NDI_SDK_APPLE_DIR")
-        .unwrap_or_else(|_| "/Library/NDI SDK for Apple".to_string());
-    let out = std::env::var("OUT_DIR").unwrap();
-    // libndi_ios.a is a fat archive (arm64 device + x86_64 sim), which
-    // rustc's archive reader cannot bundle. Thin it to the device slice.
-    let status = std::process::Command::new("lipo")
-        .args([
-            "-thin",
-            "arm64",
-            &format!("{sdk_dir}/lib/iOS/libndi_ios.a"),
-            "-output",
-            &format!("{out}/libndi_ios.a"),
-        ])
-        .status()
-        .expect("failed to run lipo on libndi_ios.a");
-    assert!(status.success(), "lipo -thin arm64 libndi_ios.a failed");
-    println!("cargo:rustc-link-search=native={out}");
-    println!("cargo:rustc-link-lib=static=ndi_ios");
-    println!("cargo:rerun-if-env-changed=NDI_SDK_APPLE_DIR");
+/// A device platform whose NDI SDK for Apple library is a static archive.
+struct AppleStatic {
+    /// Folder under `lib/` and the archive's link name there.
+    dir: &'static str,
+    lib: &'static str,
+    /// xcrun SDK name and the clang target for bindgen and compiler-rt.
+    sdk: &'static str,
+    target: &'static str,
+}
 
-    let sysroot = apple_sdk_path("iphoneos");
+impl AppleStatic {
+    /// iOS and tvOS devices. Their simulators have no NDI slice.
+    fn for_target(target_os: &str, target_abi: &str) -> Option<Self> {
+        if target_abi == "sim" {
+            return None;
+        }
+        match target_os {
+            "ios" => Some(Self {
+                dir: "iOS",
+                lib: "ndi_ios",
+                sdk: "iphoneos",
+                target: "arm64-apple-ios13.0",
+            }),
+            "tvos" => Some(Self {
+                dir: "tvOS",
+                lib: "ndi_tvos",
+                sdk: "appletvos",
+                target: "arm64-apple-tvos13.0",
+            }),
+            _ => None,
+        }
+    }
+}
+
+fn apple_sdk_dir() -> String {
+    println!("cargo:rerun-if-env-changed=NDI_SDK_APPLE_DIR");
+    std::env::var("NDI_SDK_APPLE_DIR").unwrap_or_else(|_| "/Library/NDI SDK for Apple".to_string())
+}
+
+/// Generates FFI bindings against the NDI SDK for Apple and emits link flags
+/// for the platform's static libndi, bundled into this crate's rlib so the
+/// final static library needs no NDI flags of its own.
+fn link_ndi_apple_static(platform: &AppleStatic) {
+    let sdk_dir = apple_sdk_dir();
+    let out = std::env::var("OUT_DIR").unwrap();
+    let source = format!("{sdk_dir}/lib/{}/lib{}.a", platform.dir, platform.lib);
+    let dest = format!("{out}/lib{}.a", platform.lib);
+    // A fat archive (device + simulator) cannot be bundled by the archive
+    // reader in rustc: thin it to the device slice. A thin one is used as is.
+    let archs = std::process::Command::new("lipo")
+        .args(["-archs", &source])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if archs.split_whitespace().count() > 1 {
+        let status = std::process::Command::new("lipo")
+            .args(["-thin", "arm64", &source, "-output", &dest])
+            .status()
+            .expect("failed to run lipo on the NDI archive");
+        assert!(status.success(), "lipo -thin arm64 {source} failed");
+    } else {
+        std::fs::copy(&source, &dest).unwrap_or_else(|e| panic!("copying {source}: {e}"));
+    }
+    println!("cargo:rustc-link-search=native={out}");
+    println!("cargo:rustc-link-lib=static={}", platform.lib);
+    write_apple_bindings(&sdk_dir, platform.sdk, platform.target);
+}
+
+/// Links libndi.dylib from the NDI SDK for Apple (macOS, universal). The app
+/// bundles the dylib (Contents/Frameworks) and adds that rpath itself; the
+/// returned rpath to the SDK copy lets tests and development builds run.
+fn link_ndi_macos() -> Vec<String> {
+    let sdk_dir = apple_sdk_dir();
+    let lib_dir = format!("{sdk_dir}/lib/macOS");
+    println!("cargo:rustc-link-search=native={lib_dir}");
+    println!("cargo:rustc-link-lib=dylib=ndi");
+    write_apple_bindings(&sdk_dir, "macosx", "arm64-apple-macos11");
+    vec![format!("-Wl,-rpath,{lib_dir}")]
+}
+
+fn write_apple_bindings(sdk_dir: &str, xcrun_sdk: &str, target: &str) {
+    let sysroot = apple_sdk_path(xcrun_sdk);
     let bindings = bindgen::Builder::default()
         .header(format!("{sdk_dir}/include/Processing.NDI.Lib.h"))
-        .clang_arg("--target=arm64-apple-ios13.0")
+        .clang_arg(format!("--target={target}"))
         .clang_arg(format!("-isysroot{sysroot}"))
         .allowlist_function("NDIlib_.*")
         .allowlist_type("NDIlib_.*")
@@ -172,20 +250,66 @@ fn link_ndi_apple() {
         .expect("failed to write ndi_ffi.rs");
 }
 
-fn ios_clang_rt_path() -> Option<String> {
+fn apple_clang_rt_path(platform: &AppleStatic) -> Option<String> {
     let output = std::process::Command::new("xcrun")
         .args([
             "--sdk",
-            "iphoneos",
+            platform.sdk,
             "clang",
             "-print-libgcc-file-name",
             "-target",
-            "arm64-apple-ios",
+            platform.target,
         ])
         .output()
         .ok()?;
     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if path.is_empty() { None } else { Some(path) }
+}
+
+/// Locates the NDI SDK for Linux (its installer unpacks "NDI SDK for Linux"
+/// wherever it runs): `NDI_SDK_LINUX_DIR`, else /opt.
+fn ndi_sdk_linux() -> Option<String> {
+    println!("cargo:rerun-if-env-changed=NDI_SDK_LINUX_DIR");
+    let candidates = [
+        std::env::var("NDI_SDK_LINUX_DIR").ok(),
+        Some("/opt/NDI SDK for Linux".to_string()),
+    ];
+    candidates.into_iter().flatten().find(|dir| {
+        std::path::Path::new(dir)
+            .join("include/Processing.NDI.Lib.h")
+            .is_file()
+    })
+}
+
+/// Links libndi.so from the NDI SDK for Linux, per architecture. The app
+/// ships libndi.so.6 beside the executable or on the library path; the
+/// returned rpath to the SDK copy lets tests and development builds run.
+fn link_ndi_linux(sdk_dir: &str) -> Vec<String> {
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let triple = match arch.as_str() {
+        "x86_64" => "x86_64-linux-gnu",
+        "aarch64" => "aarch64-rpi4-linux-gnueabi",
+        "arm" => "arm-rpi4-linux-gnueabihf",
+        "x86" => "i686-linux-gnu",
+        a => panic!("NDI for Linux has no {a} slice"),
+    };
+    let lib_dir = format!("{sdk_dir}/lib/{triple}");
+    println!("cargo:rustc-link-search=native={lib_dir}");
+    println!("cargo:rustc-link-lib=dylib=ndi");
+    let bindings = bindgen::Builder::default()
+        .header(format!("{sdk_dir}/include/Processing.NDI.Lib.h"))
+        .allowlist_function("NDIlib_.*")
+        .allowlist_type("NDIlib_.*")
+        .allowlist_var("NDIlib_.*")
+        .derive_default(true)
+        .prepend_enum_name(false)
+        .generate()
+        .expect("bindgen failed for NDI headers (Linux)");
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    bindings
+        .write_to_file(out.join("ndi_ffi.rs"))
+        .expect("failed to write ndi_ffi.rs");
+    vec![format!("-Wl,-rpath,{lib_dir}")]
 }
 
 fn apple_sdk_path(sdk: &str) -> String {

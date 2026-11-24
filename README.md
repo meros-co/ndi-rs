@@ -1,6 +1,7 @@
 # meros-ndi
 
-NDI for Android, iOS and Windows through direct FFI against the NDI SDK:
+NDI for Android (arm64-v8a, armeabi-v7a, x86, x86_64), iOS, tvOS, macOS,
+Windows and Linux through direct FFI against the NDI SDK:
 SDK linking, configuration, discovery, receive and send.
 
 ```rust
