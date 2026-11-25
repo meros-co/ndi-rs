@@ -166,6 +166,7 @@ mod tests {
     /// A local sender appears in the watch, and its removal is reported.
     /// Needs the NDI runtime (on PATH on Windows).
     #[test]
+    #[ignore = "finds its sender through NDI discovery (multicast); run with --ignored"]
     fn the_watch_reports_a_sender_coming_and_going() {
         let lists: Arc<Mutex<Vec<Vec<String>>>> = Arc::default();
         let seen = lists.clone();

@@ -259,6 +259,7 @@ mod loopback_tests {
     /// The caller's timecode reaches the receiver unchanged, padded rows
     /// included, instead of a clock the SDK picks.
     #[test]
+    #[ignore = "finds its sender through NDI discovery (multicast); run with --ignored"]
     fn a_caller_timecode_reaches_the_receiver() {
         if !AVAILABLE {
             eprintln!("NDI SDK not linked - skipping");
@@ -304,6 +305,7 @@ mod loopback_tests {
 
     /// Tally a receiver sets reaches the sender, for program and preview.
     #[test]
+    #[ignore = "finds its sender through NDI discovery (multicast); run with --ignored"]
     fn receiver_tally_reaches_the_sender() {
         if !AVAILABLE {
             eprintln!("NDI SDK not linked - skipping");

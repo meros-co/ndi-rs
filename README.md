@@ -82,6 +82,10 @@ executable.
 `PATH="/c/Program Files/NDI/NDI 6 SDK/Bin/x64:$PATH" cargo test`.
 `NDI_LIVE_SOURCE=<name>` adds a check against a real sender on the LAN.
 
+The tests that find a local sender through NDI discovery need multicast on
+the machine, so they are ignored by default; `cargo test -- --ignored` runs
+them. CI builds and tests without the SDK (see `.github/workflows/ci.yml`).
+
 ## Licence
 
 MIT (see LICENSE). This crate contains no NDI SDK files: it generates

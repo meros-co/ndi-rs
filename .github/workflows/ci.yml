@@ -1,0 +1,45 @@
+name: CI
+
+# The NDI SDK is proprietary and isn't on the runners, so CI builds the crate
+# the way a machine without the SDK does: on Linux and Windows build.rs warns
+# and builds without NDI (AVAILABLE = false), and the tests that need the SDK
+# skip themselves. That checks the crate compiles, the configuration and
+# timecode logic, and the no-SDK path itself. macOS, iOS and tvOS devices and
+# Android always link the SDK, so only the iOS simulator (which has no NDI
+# slice) builds on the macOS runner. The tests that find a sender through NDI
+# discovery need multicast and are #[ignore]d; run them with --ignored on a
+# machine with the SDK.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, no SDK)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+
+  ios-simulator:
+    name: iOS simulator build (no SDK)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --target aarch64-apple-ios-sim
