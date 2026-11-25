@@ -1,14 +1,14 @@
 name: CI
 
-# The NDI SDK is proprietary and isn't on the runners, so CI builds the crate
-# the way a machine without the SDK does: on Linux and Windows build.rs warns
-# and builds without NDI (AVAILABLE = false), and the tests that need the SDK
-# skip themselves. That checks the crate compiles, the configuration and
-# timecode logic, and the no-SDK path itself. macOS, iOS and tvOS devices and
-# Android always link the SDK, so only the iOS simulator (which has no NDI
-# slice) builds on the macOS runner. The tests that find a sender through NDI
-# discovery need multicast and are #[ignore]d; run them with --ignored on a
-# machine with the SDK.
+# The NDI SDK is proprietary. The SDK jobs install it with the
+# .github/actions/ndi-sdk action, which downloads it from NDI's public site
+# (accepting the NDI SDK license) and caches the download between runs:
+# Linux and macOS test against it, and Android and iOS devices build against
+# it (the iOS simulator has no NDI slice and builds without). Windows tests
+# without the SDK, the way a machine without it builds: build.rs warns,
+# AVAILABLE is false and the SDK tests skip. The tests that find a sender
+# through NDI discovery need multicast and are #[ignore]d; run them with
+# --ignored on a machine with the SDK.
 on:
   push:
     branches: [main]
@@ -21,25 +21,59 @@ concurrency:
 
 jobs:
   test:
-    name: Test (${{ matrix.os }}, no SDK)
+    name: Test (${{ matrix.os }}${{ matrix.sdk == '' && ', no SDK' || '' }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            sdk: linux
+          - os: macos-latest
+            sdk: apple
+          - os: windows-latest
+            sdk: ""
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/ndi-sdk
+        if: matrix.sdk != ''
+        with:
+          platform: ${{ matrix.sdk }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
 
-  ios-simulator:
-    name: iOS simulator build (no SDK)
+  android:
+    name: Android build (arm64-v8a, armeabi-v7a)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/ndi-sdk
+        with:
+          platform: android
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      - name: Build
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          cargo ndk --platform 34 -t arm64-v8a -t armeabi-v7a build --all-targets
+
+  ios:
+    name: iOS build (device and simulator)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/ndi-sdk
+        with:
+          platform: apple
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-ios-sim
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
       - uses: Swatinem/rust-cache@v2
+      - run: cargo build --target aarch64-apple-ios
       - run: cargo build --target aarch64-apple-ios-sim

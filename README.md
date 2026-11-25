@@ -84,9 +84,21 @@ executable.
 
 The tests that find a local sender through NDI discovery need multicast on
 the machine, so they are ignored by default; `cargo test -- --ignored` runs
-them. CI builds and tests without the SDK (see `.github/workflows/ci.yml`).
+them. CI installs the SDK on Linux, macOS and for the Android and iOS builds,
+and tests without it on Windows (see `.github/workflows/ci.yml`). Another
+repository's CI can install it the same way:
 
-## Licence
+```yaml
+- uses: meros-co/ndi-rs/.github/actions/ndi-sdk@main
+  with:
+    platform: linux # or apple, android
+```
+
+The action downloads the SDK from NDI's public site, which accepts the NDI
+SDK license, caches the download, and sets `NDI_SDK_LINUX_DIR`,
+`NDI_SDK_APPLE_DIR` or `NDI_SDK_ANDROID_DIR` and `NDI_REQUIRE_SDK=1`.
+
+## License
 
 MIT (see LICENSE). This crate contains no NDI SDK files: it generates
 bindings from, and links against, an SDK you install yourself. NDI® is a

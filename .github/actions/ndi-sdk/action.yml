@@ -1,0 +1,76 @@
+name: NDI SDK
+description: >-
+  Installs the NDI SDK for Apple, Android or Linux from NDI's public downloads,
+  which accepts the NDI SDK license, and points meros-ndi at it. The download
+  is cached between runs and fetched again when NDI publishes a new one.
+inputs:
+  platform:
+    description: "apple (macOS, iOS and tvOS), android or linux"
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Find the NDI SDK download
+      id: download
+      shell: bash
+      run: |
+        case "${{ inputs.platform }}" in
+          apple)   url=https://downloads.ndi.tv/SDK/NDI_SDK_Mac/Install_NDI_SDK_v6_Apple.pkg ;;
+          android) url=https://downloads.ndi.tv/SDK/NDI_SDK_Android/Install_NDI_SDK_v6_Android.tar.gz ;;
+          linux)   url=https://downloads.ndi.tv/SDK/NDI_SDK_Linux/Install_NDI_SDK_v6_Linux.tar.gz ;;
+          *) echo "::error::platform must be apple, android or linux, not '${{ inputs.platform }}'"; exit 1 ;;
+        esac
+        # The ETag changes when NDI publishes a new SDK at the same URL.
+        etag=$(curl -fsSI "$url" | tr -d '\r' | awk 'tolower($1) == "etag:" { print $2 }' | tr -dc 'A-Za-z0-9-')
+        dir="$RUNNER_TEMP/ndi-sdk-download"
+        echo "url=$url" >> "$GITHUB_OUTPUT"
+        echo "dir=$dir" >> "$GITHUB_OUTPUT"
+        echo "file=$dir/${url##*/}" >> "$GITHUB_OUTPUT"
+        echo "key=ndi-sdk-${{ inputs.platform }}-${etag:-$(date +%Y-%m)}" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v4
+      with:
+        path: ${{ steps.download.outputs.dir }}
+        key: ${{ steps.download.outputs.key }}
+    - name: Install the NDI SDK
+      shell: bash
+      env:
+        URL: ${{ steps.download.outputs.url }}
+        FILE: ${{ steps.download.outputs.file }}
+      run: |
+        if [ ! -s "$FILE" ]; then
+          mkdir -p "$(dirname "$FILE")"
+          curl -fsSL --retry 3 -o "$FILE" "$URL"
+        fi
+        case "${{ inputs.platform }}" in
+          apple)
+            sudo installer -pkg "$FILE" -target / > /dev/null
+            sdk="/Library/NDI SDK for Apple"
+            test -f "$sdk/include/Processing.NDI.Lib.h"
+            echo "NDI_SDK_APPLE_DIR=$sdk" >> "$GITHUB_ENV"
+            ;;
+          android|linux)
+            # The installer script shows NDI's license and asks to agree,
+            # then unpacks "NDI SDK for Android" or "NDI SDK for Linux" here.
+            work="$RUNNER_TEMP/ndi-sdk"
+            mkdir -p "$work"
+            cd "$work"
+            tar xzf "$FILE"
+            script=$(ls Install_NDI_SDK_*.sh)
+            echo y | PAGER=cat sh "$script" > /dev/null
+            if [ "${{ inputs.platform }}" = android ]; then
+              # The Android SDK unpacks lowercase include/ and lib/; meros-ndi
+              # uses the Windows installer's Include/ and Lib/.
+              sdk="$work/NDI SDK for Android"
+              ln -sfn include "$sdk/Include"
+              ln -sfn lib "$sdk/Lib"
+              test -f "$sdk/Include/Processing.NDI.Lib.h"
+              echo "NDI_SDK_ANDROID_DIR=$sdk" >> "$GITHUB_ENV"
+            else
+              sdk="$work/NDI SDK for Linux"
+              test -f "$sdk/include/Processing.NDI.Lib.h"
+              echo "NDI_SDK_LINUX_DIR=$sdk" >> "$GITHUB_ENV"
+            fi
+            ;;
+        esac
+        # Fail rather than build without NDI if the SDK isn't found.
+        echo "NDI_REQUIRE_SDK=1" >> "$GITHUB_ENV"
