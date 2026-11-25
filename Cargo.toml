@@ -21,6 +21,8 @@ tempfile = "3"
 
 [build-dependencies]
 bindgen = "0.72"
+# The libclang bindgen loads, to find its builtin headers (Android).
+clang-sys = { version = "1.9", features = ["runtime", "clang_11_0"] }
 
 # Keep debug builds small: no incremental cache, line tables only for our
 # code, and no debug info for dependencies.

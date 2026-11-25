@@ -156,6 +156,7 @@ name = "meros-ndi"
 version = "0.1.0"
 dependencies = [
  "bindgen",
+ "clang-sys",
  "log",
  "serde_json",
  "tempfile",

@@ -351,24 +351,26 @@ fn link_ndi_android() {
     println!("cargo:rustc-link-lib=dylib=ndi");
     println!("cargo:rerun-if-env-changed=NDI_SDK_ANDROID_DIR");
 
-    // bindgen needs the NDK sysroot for libc headers and the NDK clang
-    // builtins (stdbool.h etc.).
+    // bindgen needs the NDK sysroot for bionic's headers, and a target with
+    // the API level: newer NDKs refuse an unversioned Android triple.
+    //
+    // The compiler builtins (stddef.h, stdint.h, ...) must be those of the
+    // libclang bindgen loads. bindgen would otherwise add the search paths of
+    // the clang it finds (cargo-ndk's CLANG_PATH, the NDK's clang), and two
+    // clang versions' guarded builtins together stop before bionic's integer
+    // types. So the detection is off and the resource directory is given.
+    println!("cargo:rerun-if-env-changed=ANDROID_NDK_HOME");
     let ndk_home = std::env::var("ANDROID_NDK_HOME")
         .expect("ANDROID_NDK_HOME must be set (cargo-ndk sets it)");
-    let toolchain = format!("{ndk_home}/toolchains/llvm/prebuilt/{}", ndk_host_tag());
-    let clang_version = std::fs::read_dir(format!("{toolchain}/lib/clang"))
-        .ok()
-        .and_then(|mut d| d.next())
-        .and_then(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .expect("NDK clang resource dir not found");
+    let sysroot = format!("{ndk_home}/toolchains/llvm/prebuilt/{}/sysroot", ndk_host_tag());
+    let target = format!("{}{}", std::env::var("TARGET").unwrap(), android_api_level());
 
-    let target = std::env::var("TARGET").unwrap();
     let bindings = bindgen::Builder::default()
         .header(format!("{sdk_dir}/Include/Processing.NDI.Lib.h"))
         .clang_arg(format!("--target={target}"))
-        .clang_arg(format!("--sysroot={toolchain}/sysroot"))
-        .clang_arg(format!("-I{toolchain}/lib/clang/{clang_version}/include"))
+        .clang_arg(format!("--sysroot={sysroot}"))
+        .clang_arg(format!("-resource-dir={}", libclang_resource_dir()))
+        .detect_include_paths(false)
         .allowlist_function("NDIlib_.*")
         .allowlist_type("NDIlib_.*")
         .allowlist_var("NDIlib_.*")
@@ -380,4 +382,69 @@ fn link_ndi_android() {
     bindings
         .write_to_file(out.join("ndi_ffi.rs"))
         .expect("failed to write ndi_ffi.rs");
+}
+
+/// The Android API level to compile the bindings for: cargo-ndk's
+/// `--platform` (ANDROID_PLATFORM), else the oldest Android the apps support.
+fn android_api_level() -> u32 {
+    println!("cargo:rerun-if-env-changed=ANDROID_PLATFORM");
+    std::env::var("ANDROID_PLATFORM")
+        .ok()
+        .and_then(|p| p.trim_start_matches("android-").parse().ok())
+        .unwrap_or(34)
+}
+
+/// The resource directory (builtin headers under include/) of the libclang
+/// bindgen loads, for its own major version: clang/<version> beside it in an
+/// LLVM install (lib/clang, or ../lib/clang from Windows' bin/), or a Linux
+/// distribution's /usr/lib/llvm-<major>/lib/clang or /usr/lib/clang.
+fn libclang_resource_dir() -> String {
+    if !clang_sys::is_loaded() {
+        clang_sys::load().expect("couldn't load libclang");
+    }
+    let library = clang_sys::get_library().expect("libclang not loaded");
+    let path = std::fs::canonicalize(library.path()).unwrap_or_else(|_| library.path().to_path_buf());
+    let dir = path.parent().expect("libclang has no parent directory");
+    let major = libclang_major();
+    let roots = [
+        dir.join("clang"),
+        dir.join("../lib/clang"),
+        dir.join("../clang"),
+        std::path::PathBuf::from(format!("/usr/lib/llvm-{major}/lib/clang")),
+    ];
+    let found = roots
+        .iter()
+        .filter_map(|root| std::fs::read_dir(root).ok())
+        .flat_map(|entries| entries.flatten())
+        .find(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.split('.').next().and_then(|m| m.parse::<u32>().ok()) == Some(major)
+                && entry.path().join("include/stddef.h").is_file()
+        })
+        .map(|entry| entry.path())
+        .unwrap_or_else(|| {
+            panic!("no builtin headers (clang/{major}/include) for {}", path.display())
+        });
+    let found = std::fs::canonicalize(&found).unwrap_or(found);
+    // canonicalize gives Windows verbatim paths (\\?\C:\...); keep the
+    // plain form clang's diagnostics and include paths expect.
+    let found = found.to_string_lossy().into_owned();
+    found.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(found)
+}
+
+/// The loaded libclang's major version, from its version string
+/// ("clang version 18.1.8", "Ubuntu clang version 18.1.8 (...)").
+fn libclang_major() -> u32 {
+    let version = unsafe {
+        let s = clang_sys::clang_getClangVersion();
+        let text = std::ffi::CStr::from_ptr(clang_sys::clang_getCString(s)).to_string_lossy().into_owned();
+        clang_sys::clang_disposeString(s);
+        text
+    };
+    version
+        .split("version ")
+        .nth(1)
+        .and_then(|v| v.split('.').next())
+        .and_then(|m| m.trim().parse().ok())
+        .unwrap_or_else(|| panic!("can't read libclang's version from {version:?}"))
 }
